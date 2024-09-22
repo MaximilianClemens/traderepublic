@@ -32,6 +32,7 @@ class Client:
         self.websocket_connected = False
 
         self.message_dict = {}
+        self.last_hearbeat = 0
 
     def _json_api(self, *args):
         response = self._api(*args)
@@ -112,7 +113,11 @@ class Client:
         print(f'WS > {message}')
         if message == 'connected':
             self.websocket_connected = True
+        elif message.startswith('echo'):
+            # we are alive?
+            pass
         else:
+            #print(f'WS > {message}')
             (id, data) = message.split(' ', 1)
             if id not in self.message_dict:
                 self.message_dict[id] = []
@@ -121,6 +126,9 @@ class Client:
 
 
     def _websocket_send(self, function:str, number:int | None, message:str | dict | None = None):
+        if function != 'echo':
+            self.heartbeat()
+
         if not number:
             number = self.ws_counter
             self.ws_counter += 1
@@ -147,7 +155,7 @@ class Client:
                 break
         
         if id not in self.message_dict:
-            raise Exception('send sub Timeout')
+            raise Exception(f'send sub Timeout: {id}')
 
         time.sleep(1) #fixme
         response = []
@@ -170,13 +178,53 @@ class Client:
         return response
 
 
-    def get_timeline_transactions(self):
-        datas = self._websocket_send_sub({
+    def get_timeline_transactions(self, after:str=None):
+        request = {
             'type': 'timelineTransactions'
+        }
+        if after:
+            request['after'] = after
+        
+        datas = self._websocket_send_sub(request)
+
+        items = datas[0]['items']
+        
+        if datas[0]['cursors']['after']:
+            # rekursion
+            items += self.get_timeline_transactions(after=datas[0]['cursors']['after'])
+
+        return items
+
+
+    def heartbeat(self):
+        # fire and forget, i dont care
+        if self.logged_in:
+            now = int(time.time()*1000)
+            if (now - self.last_hearbeat) > 1500:
+                self._websocket_send('echo', now)
+                self.last_hearbeat = now
+                response = self._api('GET', f'/v1/auth/web/session')
+
+    def get_timeline_detail(self, id):
+        datas = self._websocket_send_sub({
+            'type': 'timelineDetailV2',
+            'id': id
         })
-        for data in datas:
-            for item in data['items']:
-                print(f'{item["id"]} {item["eventType"]} {item["title"]} {item["amount"]["value"]} {item["amount"]["currency"]}')
+        item = datas[0]
+        for section in item.get('sections',[]):
+            if section.get('title', '') == 'Dokumente':
+                for doc in section.get('data',[]):
+                    if doc.get('title', '') == 'Abrechnung':
+                        doc_url = doc.get('action', {}).get('payload', None)
+                        if doc_url:
+                            doc_data = self.session.get(doc_url)
+                            with open(f'docs/{id}.pdf', 'wb') as f:
+                                f.write(doc_data.content)
+                        else:
+                            raise Exception('DocUrl missing')
+
+
+
 
     def logout(self, close_socket:bool = True) -> bool:
         if not self.logged_in:
